@@ -14,9 +14,10 @@
 import argparse
 import inspect
 import json
+import re
 from pathlib import Path
 
-from pydantic_ai import Agent
+from pydantic_ai import Agent, DeferredToolRequests
 from pydantic_ai.exceptions import ModelHTTPError
 from fastmcp import Client
 from pydantic_ai.mcp import MCPToolset, StdioTransport
@@ -38,12 +39,16 @@ INSTRUCTIONS = """\
 """
 
 # モデルは実行時に渡す（テストではAPIを呼ばない TestModel に差し替えるため）
-agent = Agent(instructions=INSTRUCTIONS)
+# 承認付きツールがあるときは DeferredToolRequests を出力型に含める必要がある
+agent = Agent(instructions=INSTRUCTIONS, output_type=str | DeferredToolRequests)
 agent.tool_plain(tools.search_glossary)
 agent.tool_plain(tools.get_lecture_summary)
 
 # TODO(第3回 演習): tools.py に make_quiz を作り、ここで登録しよう
 agent.tool_plain(tools.make_quiz)
+
+# 学習の記録をlearning_logフォルダに保存するツール。
+agent.tool_plain(tools.save_learning_log, requires_approval=True)
 
 # 第5回: 使う MCP サーバーの設定ファイル。Claude Desktop や Cursor と同じ "mcpServers" 形式
 MCP_CONFIG = Path(__file__).resolve().parent / "mcp_servers.json"
@@ -75,6 +80,45 @@ def load_mcp_servers(config_path: Path = MCP_CONFIG) -> list[MCPToolset]:
 def build_mcp_agent(config_path: Path = MCP_CONFIG) -> Agent:
     """第5回: 関数を直接登録する代わりに、MCP サーバーが公開するツールを使うエージェント。INSTRUCTIONS は同じ。"""
     return Agent(instructions=INSTRUCTIONS, toolsets=load_mcp_servers(config_path))
+
+
+def extract_lecture(question: str) -> int | None:
+    """質問文から「第N回」を拾って回番号を返す。見つからなければ None を返す。"""
+    match = re.search(r"第\s*(\d+)\s*回", question)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def run_with_learning_log(target: Agent, question: str):
+    """質問を実行し、回答後に学習ログを自動保存するラッパー。"""
+    result = target.run_sync(question, model=build_model())
+    answer_text = str(result.output)
+
+    for message in result.all_messages():
+        for part in message.parts:
+            if isinstance(part, ToolReturnPart) and part.tool_name == "make_quiz":
+                content = part.content
+                if isinstance(content, str):
+                    try:
+                        quiz_payload = json.loads(content)
+                    except json.JSONDecodeError:
+                        quiz_payload = None
+                elif isinstance(content, dict):
+                    quiz_payload = content
+                else:
+                    quiz_payload = None
+
+                if isinstance(quiz_payload, dict):
+                    tools.save_learning_log(
+                        extract_lecture(question),
+                        quiz_payload.get("question", question),
+                        quiz_payload.get("answer", answer_text),
+                    )
+                    return result
+
+    tools.save_learning_log(extract_lecture(question), question, answer_text)
+    return result
 
 
 def build_model() -> GoogleModel:
@@ -129,7 +173,7 @@ def main() -> None:
     if args.mcp:
         print("[tools] MCP サーバー（app/mcp_servers.json）")
     try:
-        result = target.run_sync(args.question, model=build_model())
+        result = run_with_learning_log(target, args.question)
     except ModelHTTPError as e:
         print(api_error_message(e.status_code, str(e.body)[:200]))
         raise SystemExit(1)

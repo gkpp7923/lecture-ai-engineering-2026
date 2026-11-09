@@ -1,6 +1,7 @@
 """ツールのテスト（LLMもAPIキーも使わない）。"""
 
 import json
+from pathlib import Path
 
 from app import tools
 
@@ -37,6 +38,13 @@ def test_search_reports_not_found():
 def test_lecture_summary():
     assert "エージェント" in tools.get_lecture_summary(3)
     assert "まだありません" in tools.get_lecture_summary(99)
+
+
+def test_save_learning_log_creates_file():
+    payload = json.loads(tools.save_learning_log(2, "第2回の質問", "第2回の回答"))
+    assert payload["status"] == "saved"
+    assert Path(payload["path"]).exists()
+    assert Path(payload["path"]).parent.name == "lecture_02"
 
 
 def test_default_question_of_lecture1_is_answerable_from_glossary():

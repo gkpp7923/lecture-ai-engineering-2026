@@ -5,11 +5,13 @@
 """
 
 import json
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 import random
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+LEARNING_LOG_DIR = DATA_DIR / "learning_log"
 MAX_RESULTS = 3
 
 
@@ -102,3 +104,27 @@ def make_quiz(lecture: int) -> str:
         "answer": lecture_picked["definition"],
     }
     return json.dumps(quiz, ensure_ascii=False)
+
+def save_learning_log(lecture: int | None, question: str, answer: str) -> str:
+    """学習ログを保存する。保存前に利用者確認が必要な場合は、この関数をツール経由で呼ぶ。"""
+    if not question.strip():
+        return json.dumps({"status": "error", "message": "質問が空です。"}, ensure_ascii=False)
+    if not answer.strip():
+        return json.dumps({"status": "error", "message": "回答が空です。"}, ensure_ascii=False)
+
+    lecture_dir = LEARNING_LOG_DIR / (f"lecture_{lecture:02d}" if lecture is not None else "lecture_unknown")
+    lecture_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = lecture_dir / f"{timestamp}.jsonl"
+
+    entry = {
+        "lecture": lecture,
+        "question": question,
+        "answer": answer,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    return json.dumps({"status": "saved", "path": str(log_file)}, ensure_ascii=False)
