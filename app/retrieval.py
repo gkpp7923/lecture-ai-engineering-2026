@@ -33,8 +33,9 @@ def get_all_materials() -> str:
         for page in section["content"]
     )
 
-def load_pages(source: Path = RAG_SOURCE) -> list[dict]:
+def load_pages(source: Path | None = None) -> list[dict]:
     """資料→章→ページのJSONを、対象資料のページ一覧に変換する。"""
+    source = source or RAG_SOURCE
     documents = json.loads(source.read_text(encoding="utf-8"))
     pages = []
     for document in documents:
@@ -78,7 +79,7 @@ def browse_tree(node_id: str | None = None) -> dict:
 
 def read_page(page_id: str) -> dict:
     """第1〜3回の本講義から、指定した1ページの本文と引用情報を返す。"""
-    for page in load_pages(RAG_SOURCE):
+    for page in load_pages():
         if page["page_id"] == page_id:
             return page
     raise ValueError("対象のページが見つかりません。")
@@ -138,9 +139,71 @@ def search(query: str) -> list[dict]:
         return [dict(row) for row in rows]
 
 
+def search_with_neighbors(query: str, context_window: int = 1) -> list[dict]:
+    """検索結果の各ページに、同じ資料内の前後ページを付けて返す。
+
+    これは通常の検索と比較するための改善版で、根拠ページの前後文脈を
+    1ページずつ付けて回答に使いやすくする。
+    """
+    if context_window < 0:
+        raise ValueError("context_window は 0 以上である必要があります。")
+    hits = search(query)
+    if not hits:
+        return []
+
+    pages_by_id = {page["page_id"]: page for page in load_pages()}
+    pages_by_document: dict[str, list[dict]] = defaultdict(list)
+    for page in pages_by_id.values():
+        pages_by_document[page["document_id"]].append(page)
+    for document_pages in pages_by_document.values():
+        document_pages.sort(key=lambda p: p["page"])
+
+    page_contexts: dict[str, list[str]] = {}
+    for document_pages in pages_by_document.values():
+        for index, page in enumerate(document_pages):
+            start = max(0, index - context_window)
+            end = min(len(document_pages), index + context_window + 1)
+            page_contexts[page["page_id"]] = [
+                neighbor["page_id"]
+                for neighbor in document_pages[start:end]
+                if neighbor["page_id"] != page["page_id"]
+            ]
+
+    expanded: list[dict] = []
+    seen: set[str] = set()
+    for hit in hits:
+        page_id = hit["page_id"]
+        if page_id not in pages_by_id:
+            if page_id not in seen:
+                seen.add(page_id)
+                expanded.append({**hit, "neighbor_context": []})
+            continue
+
+        if page_id in seen:
+            continue
+        seen.add(page_id)
+        expanded.append({
+            **pages_by_id[page_id],
+            "distance": hit.get("distance"),
+            "neighbor_context": page_contexts.get(page_id, []),
+        })
+
+        for neighbor_id in page_contexts.get(page_id, []):
+            if neighbor_id in seen:
+                continue
+            seen.add(neighbor_id)
+            neighbor_page = pages_by_id[neighbor_id]
+            expanded.append({
+                **neighbor_page,
+                "distance": hit.get("distance"),
+                "neighbor_context": page_contexts.get(neighbor_id, []),
+            })
+    return expanded
+
+
 def search_graph(query: str) -> dict:
     """ベクトル検索を入口に、前後ページと共通用語で候補を広げる。"""
-    pages = {page["page_id"]: page for page in load_pages(RAG_SOURCE)}
+    pages = {page["page_id"]: page for page in load_pages()}
     graph = json.loads(RAG_GRAPH.read_text(encoding="utf-8"))
     nodes = {node["id"]: node for node in graph["nodes"]
              if node["kind"] == "term" or node["id"] in pages}

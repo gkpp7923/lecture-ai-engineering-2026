@@ -42,6 +42,40 @@ def test_built_index_can_be_searched(materials, monkeypatch):
     assert hits[0]["distance"] == pytest.approx(0)
 
 
+def test_search_with_neighbors_includes_adjacent_pages(monkeypatch, tmp_path):
+    source = tmp_path / "lectures.json"
+    source.write_text(json.dumps([
+        {"id": "lec01-main", "title": "講義1", "content": [
+            {"section": "章A", "content": [
+                {"id": "lec01-main-p001", "title": "ページ1", "page": 1, "content": "本文1"},
+                {"id": "lec01-main-p002", "title": "ページ2", "page": 2, "content": "本文2"},
+                {"id": "lec01-main-p003", "title": "ページ3", "page": 3, "content": "本文3"},
+            ]}
+        ]},
+        {"id": "lec02-main", "title": "講義2", "content": [
+            {"section": "章B", "content": [
+                {"id": "lec02-main-p001", "title": "別ページ", "page": 1, "content": "本文別"},
+            ]}
+        ]},
+    ], ensure_ascii=False), encoding="utf-8")
+    database = tmp_path / "index.sqlite3"
+    build_index(source, database, embedder=lambda *_: [1, 0])
+    monkeypatch.setattr(retrieval, "RAG_SOURCE", source)
+    monkeypatch.setattr(retrieval, "RAG_DB", database)
+    monkeypatch.setattr(retrieval, "embed_text", lambda *_: [1, 0])
+
+    hits = retrieval.search_with_neighbors("質問", context_window=1)
+
+    assert [h["page_id"] for h in hits[:3]] == [
+        "lec01-main-p001",
+        "lec01-main-p002",
+        "lec01-main-p003",
+    ]
+    assert hits[0]["neighbor_context"] == ["lec01-main-p002"]
+    assert hits[1]["neighbor_context"] == ["lec01-main-p001", "lec01-main-p003"]
+    assert hits[2]["neighbor_context"] == ["lec01-main-p002"]
+
+
 def test_existing_index_survives_failed_rebuild(materials):
     source, database = materials
     build_index(source, database, embedder=lambda *_: [1, 0])
